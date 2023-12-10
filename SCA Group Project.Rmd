@@ -1,0 +1,695 @@
+---
+title: "Supply Chain Analytics Group Projects"
+subtitle: "Point of Sale Forecasting for Carbonated Beverages"
+output: html_notebook
+---
+
+In this assignment you are tasked with building a realistic demand forecasting model for a specific product from the carbonated beverages category using a real data set from a large sample of sales in actual supermarkets. 
+
+The data is provided in two files, **Carbonated_Beverages.RDS** which contains the sales information, and **Carb_Bev_Prod_UPC.csv** with descriptive characteristics for each product in the category. The first step in this project is to download the above two data files, make sure that you can access the data and that your computer can handle it. To this end, please execute the code box below
+
+```{r warning=FALSE}
+library(fpp3)
+
+CB <- readRDS("CarbBev.RDS")
+U <- read.csv("Carb_Bev_Prod_UPC.csv") %>% 
+  as_tibble %>% 
+  mutate(UPC = as.factor(UPC))
+```
+
+If your computer bombs with that data set, please do not panic nor run to the store to buy a new laptop.  All you have to do is let me know, and I will break the large RDS file into manageable chunks so you can process it sequentially; this is also a very useful data wrangling skill.
+
+Simultaneously with testing if your computer can ingest the data you must form a team of 3 to 4 students and select the product and store you want to use to base your project.  Each team will work on a different store-product combination, and the different "OPTIONS" will be assigned upon request on Slack on a first-come first-assigned basis. 
+
+| OPTION |  PRODUCT (UPC) |  STORE NUMBER |
+|:-----|:-------:|:-------:|
+|1 | 00-01-49000-02890 | 648235 |
+|2 | 00-01-49000-02891 | 932600 |
+|3 | 00-01-12000-80994 | 253139 |
+|4 | 00-01-12000-80995 | 205512 |
+|5 | 00-01-78000-08216 | 225023 |
+|6 | 00-01-12000-00230 | 649405 |
+|7 | 00-01-12000-80996 | 648459 |
+|8 | 00-01-78000-08316 | 293283 |
+
+You may test your data while you explore the product's characteristics by running the following code.
+
+```{r}
+U %>% 
+  filter(UPC == "00-01-49000-02890" |
+         UPC == "00-01-49000-02891" |
+         UPC == "00-01-12000-80994" |
+         UPC == "00-01-12000-80995" |
+         UPC == "00-01-78000-08216" |
+         UPC == "00-01-12000-00230" |
+         UPC == "00-01-12000-80996" |
+         UPC == "00-01-78000-08316") 
+```
+
+Your task is to:
+Note: 
+Need to unstack to make each row show all inforamtion.
+A lot of NA
+
+1. Create a demand model based on linear regression that will:
+  a) Identify the set of products that has the strongest interaction with your product
+  b) Obtain an estimate the price-elasticity of your product
+  c) Examine the impact of the price and promotional variables of the products that are relevant for your model
+  
+2. Validate your model above in terms of residuals and cross-validation, and if any of the above fail, resolve the issue by including the appropriate ARIMA terms in your model.
+
+3. Develop at least two (possibly more) model options and explain your selection using the different criteria discussed in class.
+
+4. Use your selected model to provide a forecast for the following 8 weeks of demand.  If you need any regressors, use the naive-seasonal (with weekly seasonality) to forecast your regressors.
+
+
+Part I: Data Preparation
+
+A. Using the data provided, subset the data that is relevant for your analysis
+```{r}
+D <- readRDS("CarbBev.RDS") %>% 
+  filter(UPC == "00-01-12000-00230") %>% 
+  filter(STORE == 649405) %>% 
+  mutate(P = DOLLARS/UNITS) %>% 
+  # Remove column DOLLARS, since it can cause a data leakage problem
+  select(-DOLLARS)
+```
+B. Reorganize the relevant data so that you can use the LASSO to identify the relevant products that may influence yours.
+```{r}
+# Need tidyverse for data manipulation
+library(tidyverse)
+# Need glmnet package for LASSO
+library(glmnet)
+# Need forecast for cross validation
+library(forecast)
+
+
+# Create the model matrix
+# (.)^2 means that we want to include all the variables and their interactions
+# -1 means that we do not want to include the intercept
+# Here we are taking both the log of x and y to get a log log model that models price elasticity
+x <- log(model.matrix(UNITS ~ (.)^2 -1, data=D))
+y <- log(D$UNITS)
+
+
+# STEP [1]
+# Train Set and Test Set Random Selection
+# Set seed to allow for reproducibility
+set.seed(1)
+
+# Sample 50% of the rows of the dataset to be the training set
+# and the other 50% to be the testing set
+train <- sample(1:nrow(D),nrow(x)/2)
+
+# If y includes rows 8,5,4,3,7 and train is 8,4,7 then -train is 5,3
+# The negative sign just means the rows left after removing the training rows (their indices)
+test <- -train
+
+# STEP [2]
+# Create the grid of values for lambda, the tuning parameter
+# Here we are creating a sequence of 100 values from -10 to 2 as potential values for lambda
+# We then take the exponential of these values to get a sequence of 100 values from -10 to 2
+# This is because the glmnet function takes the log of lambda as an input
+l.val <- seq(-10,2,length=100) %>% exp()
+
+# Fit The Lasso Model for all the possible values guessed Lambda
+# Setting alpha = 0 solves Ridge regression
+# Setting alpha = 1 solves the LASSO
+# Here we index x and y with train to select only the rows of x and y that are in the training set
+# x[train,] means all the rows of x that are in the training set and all the columns of x
+fit.L <- glmnet(x[train,],y[train], alpha=1,lambda=l.val)
+# We want all variables to start horizontal and end vertical
+# If all horizontal then we have lambdas that are too small, leading to no variables being eliminated
+# If all vertical then we have lambdas that are too large, leading to all variables being eliminated
+# This way we have a good range of values for lambda
+plot(fit.L, xvar="lambda", label=TRUE)
+
+# STEP [3]
+# Cross Validation on all the values of lambda
+# Default is 10-fold cross validation
+set.seed(123)
+CV.L <- cv.glmnet(x[train,],y[train],alpha=1,lambda = l.val)
+plot(CV.L)
+
+# STEP [4]
+# Select MSE minimizing Lambda(s)
+# and Lambda 1se
+# Lambda 1se is the largest lambda such that the error is within 1 standard deviation of the minimum
+L.min <- CV.L[["lambda.min"]]
+L.1se <- CV.L[["lambda.1se"]]
+# In original scale
+L.min; L.1se
+# In log scale
+log(L.min); log(L.1se)
+
+# STEP [5] 
+#
+# Calculate Predicted Values and MSE on Testing set and
+# compare testing set MSE with 1.65 std dev conf interval
+data.frame(Y.Test = y[test]) %>%
+mutate(
+# s=L.min means that we are using the lambda that minimizes the cross validation error
+# newx=x[test,] means that we are using the testing set to calculate the predicted values
+PR.Lmin = predict(fit.L, s=L.min, newx=x[test,]),
+PR.L1se = predict(fit.L, s=L.1se, newx=x[test,]),
+# We manually calculate the squared error for using L.min and L.1se
+SE.Lmin = (Y.Test - PR.Lmin)^2,
+SE.L1se = (Y.Test - PR.L1se)^2
+) %>%
+# Group by nothing, so that we can calculate the mean of the squared errors of all the rows
+# We can see Lmin is doing better than L1se
+group_by() %>%
+summarize(OOSMSE.Lmin = mean(SE.Lmin),
+OOSMSE.1SE = mean(SE.L1se))
+
+# STEP [6]
+# Accepting Lambda-min as an appropriate model tuning parameter
+# We proceed to fit a model with it.
+# Finding Coefficients with all data for both L.min
+fit.All <- glmnet(x,y,alpha=1,lambda=c(L.min))
+# We can see the coefficients for L.min selected by the LASSO
+coef(fit.All,s=c(L.min))
+
+# Extracting coefficients for the chosen lambda
+lasso_coefs <- coef(fit.L, s = L.min)
+
+# Converting the sparse matrix to a regular matrix
+# We use as.matrix and drop = FALSE to ensure it stays as a matrix
+lasso_coefs_matrix <- as.matrix(lasso_coefs, sparse = FALSE, drop = FALSE)
+
+# The first column of the matrix contains the coefficients
+# The row names are the variable names (including the intercept)
+lasso_df <- data.frame(Variable = rownames(lasso_coefs_matrix), 
+                       Coefficient = lasso_coefs_matrix[, 1])
+
+# To remove the intercept or zero coefficients:
+lasso_df <- lasso_df[-1, ]  # Removes the intercept
+lasso_df <- lasso_df[lasso_df$Coefficient != 0, ]  # Removes zero coefficients
+lasso_df
+
+# We can see Price and Week are significant and now we create a new data frame with only those variables
+Selected <- D %>% 
+  select(WEEK, P)
+Selected
+```
+C. Examine the data and eliminate products/rows with missing data for your analysis
+
+**Deliverable:**  (5 pts. - Due on Nov. 17 or Before) An RMD notebook file with its corresponding executed HTML document showing your code and explaining your data design and cleansing decisions
+```{r}
+X <- readRDS("CarbBev.RDS") %>% 
+  filter(STORE == 649405) %>% 
+  filter(UPC != "00-01-12000-00230") %>% 
+  mutate(P = DOLLARS/UNITS) %>% 
+  select(WEEK,UPC,P) %>% 
+  pivot_wider(names_from = UPC,
+              values_from = P) %>% 
+  left_join(Selected,.,by = c("WEEK")) %>% 
+  as_tibble(index = WEEK)
+X
+
+XR <- X %>% 
+  # If the number of NAs in that row is less than 1 we select
+  select_if(~sum(is.na(.)) <= 1) 
+# Remove all the rows that have NAs and now we have a finished dataset with competitors included
+XR %>% na.omit -> Y
+Y
+```
+
+
+Part II: (15 pts.) Model Development and Analysis
+
+A. Identify the products that are most relevant for your forecast using the LASSO.
+
+B. For the products in (A) identify the combination of promotional variables tat impact your product's demand
+
+C. Validate the model in (B) and if necessary enhance it to deal with any correlations that may be present in the residuals.
+
+D. Provide an 8-week-ahead demand forecast
+
+**Deliverable:** An RMD notebook file with its corresponding executed HTML document showing your code, and explaining all the modeling decisions you made, as well as your justification/validation of the model and your forecast. 
+
+PART A: 
+Creating the data frame with the focal product and the competitors
+```{r}
+# Get the data for the focal product
+CB %>% 
+  filter(STORE ==  649405 ) %>% 
+  filter(UPC == "00-01-12000-00230") %>% 
+  mutate(P = DOLLARS/UNITS) %>% 
+  select(-STORE,-UPC,-VEND,-ITEM, -DOLLARS) -> D
+
+# Get the data from the competitors
+CB %>% 
+  filter(STORE ==  649405 ) %>% 
+  filter(UPC != "00-01-12000-00230") %>% 
+  mutate(P = DOLLARS/UNITS) %>% 
+  select(WEEK, UPC, P) %>% 
+  pivot_wider(names_from = UPC,
+              values_from = P) %>% 
+  select_if(~sum(is.na(.)) == 0) %>% 
+  left_join(D,.,by = "WEEK") %>% 
+  as_tsibble(index = WEEK) -> D
+```
+
+Now we test with simple models and run a quick LASSO to see which products are relevant for our model:
+```{r}
+m <- D %>% 
+  model(mLR  = TSLM(log(UNITS) ~ log(P)),
+        mRA  = ARIMA(log(UNITS) ~ log(P)))
+
+m %>% select(mLR) %>% report
+m %>% select(mRA) %>% report
+
+m %>% 
+  augment %>% 
+  features(.resid, ljung_box, lag = 10)
+
+m %>% glance
+```
+
+```{r}
+library(glmnet)
+x <- model.matrix(UNITS ~ . -1, data=D %>% as_tibble %>% select(-WEEK))
+y <- D$UNITS
+
+
+l.val <- seq(-10,8,length=100) %>% exp()
+
+fit.L <- glmnet(x,y, alpha=1,lambda=l.val)
+plot(fit.L, xvar="lambda", label=TRUE)
+
+set.seed(123)
+CV.L <- cv.glmnet(x,y,alpha=1,lambda = l.val)
+plot(CV.L)
+
+L.min <- CV.L[["lambda.min"]]
+L.1se <- CV.L[["lambda.1se"]]
+L.min; L.1se
+log(L.min); log(L.1se)
+```
+
+We can see the selection of variables using L.1se didn't even include price, meaning there might be a multicolinearity problem.
+```{r}
+coef(CV.L,s=c(L.min,L.1se))
+```
+
+There is too much information if we just do a correlation matrix on the entire data frame.
+```{r}
+D %>% 
+  as_tibble %>% 
+  select(-WEEK,-PR,-D,-FEAT,-UNITS) %>% 
+  cor
+```
+
+Now we try fix the multicolinearity problem by using clustering on the products.
+```{r}
+D %>% 
+  as_tibble %>% 
+  select(-WEEK,-D,-PR,-FEAT,-UNITS) %>% 
+  # scale will center and scale the data
+  # it will calculate the mean and sd
+  # whatever vector you pass, will change it to have mean of 0 and sd of 1
+  scale %>% 
+  # t will transpose the matrix so the time is the column and the products are the rows
+  t %>% 
+  # we want most of variability explained by between cluster variability instead of within cluster variability
+  # high between cluster variability means that the clusters are very different and good
+  kmeans(5, iter.max = 100) -> KM
+```
+```{r}
+# Create separate data frames for each cluster containing the UPCs in each cluster
+KM[["cluster"]] %>% as_tibble_row %>% select_if(~(.==1)) %>% colnames -> K1
+KM[["cluster"]] %>% as_tibble_row %>% select_if(~(.==2)) %>% colnames -> K2
+KM[["cluster"]] %>% as_tibble_row %>% select_if(~(.==3)) %>% colnames -> K3
+KM[["cluster"]] %>% as_tibble_row %>% select_if(~(.==4)) %>% colnames -> K4
+KM[["cluster"]] %>% as_tibble_row %>% select_if(~(.==5)) %>% colnames -> K5
+```
+
+Now we can look at correlation for each cluster.
+```{r}
+D %>% 
+  as_tibble %>% 
+  select(-WEEK,-PR,-D,-FEAT,-UNITS) %>% 
+  # all_of will select the columns in the vector
+  select(all_of(K5)) %>% 
+  cor
+```
+
+We can also see the count the number of sales entrie by each vendor in the data.
+```{r}
+# We can see how many entries we have for each vendor and identify the ones with the most entries
+StapleProducts <- colnames(D)[7:154] %>% as.factor
+CB %>% 
+  filter(UPC %in% StapleProducts) %>% 
+  group_by(VEND) %>% 
+  summarize(NUMBER = n()) %>% 
+  arrange(by = -NUMBER)
+```
+
+We can see the correlation between the vendors with the most entries.
+```{r}
+# We can then find the vendor correlation matrix
+# This way we can only look at the correlation between the vendors with the most entries
+VendorCor <- function(V){
+  CB %>% 
+  filter(STORE ==  649405 ) %>% 
+  filter(VEND == V) %>% 
+  mutate(P = DOLLARS/UNITS) %>% 
+  select(WEEK, UPC, P) %>% 
+  pivot_wider(names_from = UPC,
+              values_from = P) %>% 
+  select_if(~sum(is.na(.)) == 0) %>% 
+  select(-WEEK) %>% 
+  cor
+}
+VendorCor(12000)
+```
+
+The function below subsets the entries for a specific vendor or ALL.  
+Then the second function runs the KMeans algorithm for increasing numbers of clusters, K, and plots the between-clusters Sum-of-Squares as a percentage of the total sum of squares.
+The goal is the divide the data by vendor, find the optimal number of clusters for each vendor, then run the KMeans algorithm for each vendor.
+```{r}
+# For selecting only a specific vendor or all
+VendSS <- function(V){
+  (\(x)(if (V != "ALL") x %>% filter(VEND == V) else (x)))(CB) %>% 
+  filter(STORE ==  649405 ) %>% 
+  mutate(P = DOLLARS/UNITS) %>% 
+  select(WEEK, UPC, P) %>% 
+  pivot_wider(names_from = UPC,
+              values_from = P) %>% 
+  select_if(~sum(is.na(.)) == 0) %>% 
+  select(-WEEK) %>% 
+  scale %>% 
+  as_tibble
+}
+
+# Look at the elbow to find the number of clusters needed, we want to maximize the between cluster variability
+# We will use this function to find the optimal cluster number later
+KMPlot <- function(V){
+  KMS <- tibble(TOT.SS = numeric(),INC.SS=numeric(),BC.SS=numeric())
+  for (k in 2:round(dim(V)[2]/2)){
+    set.seed(123)
+    KM <- V %>% 
+      t %>% kmeans(k,iter.max = 5*k)
+    KMS <- KMS %>% add_row(TOT.SS = KM[["totss"]],
+                    INC.SS = KM[["tot.withinss"]],
+                    BC.SS = KM[["betweenss"]])
+  }
+  KMS %>% mutate(PCT.BC = 100*BC.SS/TOT.SS) -> KMS
+  plot(2:round(dim(V)[2]/2),KMS$PCT.BC)
+}
+
+# These three corresponds to Coke, Dr. Pepper, and Pepsi
+# They are the top 3 vendors in our data
+# Just need to look at these 3 since they take up most parts of the data
+49000 %>% VendSS %>% KMPlot
+78000 %>% VendSS %>% KMPlot
+12000 %>% VendSS %>% KMPlot
+"ALL" %>% VendSS %>% KMPlot
+```
+
+The function below performs the KMeans algorithm for a given vendor and the selected number of clusters.
+```{r}
+KMPdata <- function(V,K){
+  set.seed(123)
+  V %>% 
+    t %>% kmeans(K,iter.max = 5*K)
+}
+
+# After looking at the between cluster variability, and determining the optimal number of clusters for each vendor
+# We can now run the KMeans algorithm for each vendor
+49000 %>% VendSS %>% KMPdata(9) -> KCoke9
+78000 %>% VendSS %>% KMPdata(16) -> KDrPep16
+12000 %>% VendSS %>% KMPdata(11) -> KPepsi11
+"ALL" %>% VendSS %>% KMPdata(40) -> KALL40
+```
+
+The first function below obtain the correlation matrix for a specific cluster and the focal product.
+The second function displays the relevant UPC information for each product in each cluster.
+```{r}
+ClusterFCor <- function(CL,n){
+  KUPS <- CL[["cluster"]] %>% 
+    as_tibble_row %>% 
+    select_if(~(.== n)) %>% 
+    colnames 
+  CB %>% 
+  filter(STORE ==  649405) %>% 
+  # Filter for the focal product and the products in the cluster
+  filter(UPC %in% c("00-01-12000-00230", KUPS)) %>% 
+  mutate(P = DOLLARS/UNITS) %>% 
+  select(WEEK, UPC, P) %>% 
+  pivot_wider(names_from = UPC,
+              values_from = P) %>% 
+  select_if(~sum(is.na(.)) == 0) %>% 
+  select(-WEEK) %>% 
+  cor
+}
+
+ClusterInfo <- function(CL,n){
+  LUPS <-  CL[["cluster"]] %>% 
+    as_tibble_row %>% 
+    select_if(~(.== n)) %>% 
+    colnames
+  # Filter for the focal product and the products in the cluster
+  U %>% filter(UPC %in% c("00-01-12000-00230", LUPS)) %>% 
+  select(UPC, L5, L9, VOL_EQ, PACKAGE, CALORIE.LEVEL)
+}
+
+ClusterFCor(KPepsi11,11)
+ClusterInfo(KPepsi11,11)
+```
+
+What remains is select a representative product from each cluster and then run the LASSO with the restricted set of representative products.
+After this we need to filter the products in the created list and pivot and join with the focal product data.
+```{r}
+# Select a representative product from each cluster
+RepProds <- c("00-01-12000-00849", "00-01-12000-00017", "00-01-12000-80996", "00-01-12000-00231", "00-02-12000-81014", 
+              "00-01-12000-01880", "00-01-12000-01594", "00-01-12000-80999", "00-04-12000-00239", "00-01-12000-00053", 
+              "00-01-12000-00131") 
+
+# Filter for the focal product
+CB %>% 
+  filter(STORE ==  649405 ) %>% 
+  filter(UPC == "00-01-12000-00230") %>% 
+  mutate(P = DOLLARS/UNITS) %>% 
+  select(-STORE,-UPC,-VEND,-ITEM, -DOLLARS) -> SD
+
+# Filter for the representative products and join the focal product data
+CB %>% 
+  filter(STORE ==  649405 ) %>% 
+  filter(UPC %in% RepProds) %>% 
+  mutate(P = DOLLARS/UNITS) %>% 
+  select(WEEK, UPC, P, D, PR, FEAT) %>% 
+  pivot_wider(names_from = UPC,
+              values_from = c(P,D,PR,FEAT)) %>% 
+  select_if(~sum(is.na(.)) == 0) %>% 
+  left_join(SD,.,by = "WEEK") %>% 
+  as_tsibble(index = WEEK) -> SD
+```
+
+Now we can run the LASSO on the reduced data set after we have removed multicolinearity.
+```{r}
+# Need tidyverse for data manipulation
+library(tidyverse)
+# Need glmnet package for LASSO
+library(glmnet)
+# Import fable for forecasting
+library(fable)
+
+# Create the model matrix
+# (.)^2 means that we want to include all the variables and their interactions
+# -1 means that we do not want to include the intercept
+x <- model.matrix(UNITS ~ (.)^2 -1, data=SD)
+y <- SD$UNITS
+
+
+# STEP [1]
+# Train Set and Test Set Random Selection
+# Set seed to allow for reproducibility
+set.seed(1)
+
+# Sample 50% of the rows of the dataset to be the training set
+# and the other 50% to be the testing set
+train <- sample(1:nrow(SD),nrow(x)/2)
+
+# If y includes rows 8,5,4,3,7 and train is 8,4,7 then -train is 5,3
+# The negative sign just means the rows left after removing the training rows (their indices)
+test <- -train
+
+# STEP [2]
+# Create the grid of values for lambda, the tuning parameter
+# Here we are creating a sequence of 100 values from -10 to 2 as potential values for lambda
+# We then take the exponential of these values to get a sequence of 100 values from -10 to 2
+# This is because the glmnet function takes the log of lambda as an input
+l.val <- seq(-10,8,length=100) %>% exp()
+
+# Fit The Lasso Model for all the possible values guessed Lambda
+# Setting alpha = 0 solves Ridge regression
+# Setting alpha = 1 solves the LASSO
+# Here we index x and y with train to select only the rows of x and y that are in the training set
+# x[train,] means all the rows of x that are in the training set and all the columns of x
+fit.L <- glmnet(x[train,],y[train], alpha=1,lambda=l.val)
+# We want all variables to start horizontal and end vertical
+# If all horizontal then we have lambdas that are too small, leading to no variables being eliminated
+# If all vertical then we have lambdas that are too large, leading to all variables being eliminated
+# This way we have a good range of values for lambda
+plot(fit.L, xvar="lambda", label=TRUE)
+
+# STEP [3]
+# Cross Validation on all the values of lambda
+# Default is 10-fold cross validation
+set.seed(123)
+CV.L <- cv.glmnet(x[train,],y[train],alpha=1,lambda = l.val)
+plot(CV.L)
+
+# STEP [4]
+# Select MSE minimizing Lambda(s)
+# and Lambda 1se
+# Lambda 1se is the largest lambda such that the error is within 1 standard deviation of the minimum
+L.min <- CV.L[["lambda.min"]]
+L.1se <- CV.L[["lambda.1se"]]
+# In original scale
+L.min; L.1se
+# In log scale
+log(L.min); log(L.1se)
+
+# STEP [5] 
+#
+# Calculate Predicted Values and MSE on Testing set and
+# compare testing set MSE with 1.65 std dev conf interval
+data.frame(Y.Test = y[test]) %>%
+mutate(
+# s=L.min means that we are using the lambda that minimizes the cross validation error
+# newx=x[test,] means that we are using the testing set to calculate the predicted values
+PR.Lmin = predict(fit.L, s=L.min, newx=x[test,]),
+PR.L1se = predict(fit.L, s=L.1se, newx=x[test,]),
+# We manually calculate the squared error for using L.min and L.1se
+SE.Lmin = (Y.Test - PR.Lmin)^2,
+SE.L1se = (Y.Test - PR.L1se)^2
+) %>%
+# Group by nothing, so that we can calculate the mean of the squared errors of all the rows
+# We can see Lmin is doing better than L1se
+group_by() %>%
+summarize(OOSMSE.Lmin = mean(SE.Lmin),
+OOSMSE.1SE = mean(SE.L1se))
+
+# STEP [6]
+# Accepting Lambda-min as an appropriate model tuning parameter
+# We proceed to fit a model with it.
+# Finding Coefficients with all data for both L.min
+fit.All <- glmnet(x,y,alpha=1,lambda=c(L.min))
+# We can see the coefficients for L.min selected by the LASSO
+coef(fit.All,s=c(L.min))
+
+# Extracting coefficients for the chosen lambda
+lasso_coefs <- coef(fit.L, s = L.min)
+
+# Converting the sparse matrix to a regular matrix
+# We use as.matrix and drop = FALSE to ensure it stays as a matrix
+lasso_coefs_matrix <- as.matrix(lasso_coefs, sparse = FALSE, drop = FALSE)
+
+# The first column of the matrix contains the coefficients
+# The row names are the variable names (including the intercept)
+lasso_df <- data.frame(Variable = rownames(lasso_coefs_matrix), 
+                       Coefficient = lasso_coefs_matrix[, 1])
+
+# To remove the intercept or zero coefficients:
+lasso_df <- lasso_df[-1, ]  # Removes the intercept
+lasso_df <- lasso_df[lasso_df$Coefficient != 0, ]  # Removes zero coefficients
+lasso_df
+```
+
+The varibales selected by the LASSO are: <br>
+FEAT, WEEK, PRICE, DEAL, PR, "P_00-01-12000-00849", "P_00-01-12000-80999", "P_00-01-12000-01594", "D_00-01-12000-01594", "PR_00-01-12000-01594", "FEAT_00-01-12000-00231", "D_00-01-12000-00231", "PR_00-01-12000-00053", "PR_00-01-12000-00017" <br>
+Specifically, we can see the price of product 00-01-12000-00849, 00-01-12000-80999, and 00-01-12000-01594 are important factors that can effect the demand of our focal product. <br>
+We can also see the deal of product 00-01-12000-01594 and 00-01-12000-00231 are important factors that can effect the demand of our focal product. <br>
+We can also see the feature of product 00-01-12000-00231 is an important factor that can effect the demand of our focal product. <br>
+We can also see the PR of product 00-01-12000-01594, 00-01-12000-00053, and 00-01-12000-00017 are important factors that can effect the demand of our focal product. <br>
+We can see the selection of variables using L.1se now include price, suggesting that we have removed the multicolinearity problem.
+```{r}
+Selected <- SD %>% 
+  select(UNITS, FEAT, WEEK, P, "P_00-01-12000-00849", "P_00-01-12000-80999", "P_00-01-12000-01594", "D_00-01-12000-01594", "PR_00-01-12000-01594", "FEAT_00-01-12000-00231", "D_00-01-12000-00231", "PR_00-01-12000-00053", "PR_00-01-12000-00017")
+Selected
+```
+
+Finally, we can build models using the selected variables and see which one is the best.
+```{r}
+Selected_filled <- Selected %>%
+  tsibble::fill_gaps()
+
+# Rename the variables
+names(Selected_filled) <- gsub("-", "_", names(Selected_filled))
+
+# Split the data into training and testing where the testing set is the last 8 weeks
+Selected_filled %>% 
+  filter(WEEK < 1627) -> train
+Selected_filled %>%
+  filter(WEEK >= 1627) -> test
+
+# Then run the models
+m <- train %>% 
+    model(
+    mLR_base = TSLM(log(UNITS) ~ log(P)),
+    mLR  = TSLM(log(UNITS) ~ log(P) + FEAT + WEEK + log(P_00_01_12000_00849) + log(P_00_01_12000_80999) + log(P_00_01_12000_01594) + D_00_01_12000_01594 + PR_00_01_12000_01594 + FEAT_00_01_12000_00231 + D_00_01_12000_00231 + PR_00_01_12000_00053 + PR_00_01_12000_00017),
+    mRA_base = ARIMA(log(UNITS) ~ log(P)),
+    mRA  = ARIMA(log(UNITS) ~ log(P) + FEAT + WEEK + log(P_00_01_12000_00849) + log(P_00_01_12000_80999) + log(P_00_01_12000_01594) + D_00_01_12000_01594 + PR_00_01_12000_01594 + FEAT_00_01_12000_00231 + D_00_01_12000_00231 + PR_00_01_12000_00053 + PR_00_01_12000_00017)
+    )
+
+m %>% select(mLR_base) %>% report
+# Seems like price, features B and C, Week, log(P_00_01_12000_01594), PR_00_01_12000_01594 are the only significant variables according to TSLM
+m %>% select(mLR) %>% report
+m %>% select(mRA_base) %>% report
+# Seems like Price, all features, Week, log(P_00_01_12000_01594), PR_00_01_12000_01594 are the only significant variables according to ARIMA
+m %>% select(mRA) %>% report
+
+# Create new models with only the significant variables
+m <- train %>% 
+    model(
+    mLR_base = TSLM(log(UNITS) ~ log(P)),
+    mLR  = TSLM(log(UNITS) ~ log(P) + FEAT + WEEK + log(P_00_01_12000_01594) + PR_00_01_12000_01594),
+    mRA_base = ARIMA(log(UNITS) ~ log(P)),
+    mRA  = ARIMA(log(UNITS) ~ log(P) + FEAT + WEEK + log(P_00_01_12000_01594) + PR_00_01_12000_01594)
+    )
+
+# Now only significant variables are included
+m %>% select(mLR_base) %>% report
+m %>% select(mLR) %>% report
+m %>% select(mRA_base) %>% report
+m %>% select(mRA) %>% report
+
+# Ljung-Box test for autocorrelation
+# We can see both models pass the test
+m %>% 
+  augment %>% 
+  features(.resid, ljung_box)
+
+# We can see all inverse roots are within the unit circle for ARIMA models
+m %>% select(mRA_base) %>% gg_arma()
+m %>% select(mRA) %>% gg_arma()
+
+# Compare AICc
+# We can see mLR_base acutally has the lowest AICc
+# Of the ARIMA models, the one with the lowest AICc is mRA not mRA_base
+m %>% glance %>% select(.model, AIC, AICc, BIC)
+
+# Forcast on the testing set, the 8 weeks ahead
+# Seems like mLR base resulted in the lowest MAPE with 18.4746
+fcast_mLR_base <- m %>% select(mLR_base) %>% forecast(new_data = test)
+acc_mLR_base <- accuracy(fcast_mLR_base$.mean, test$UNITS)
+acc_mLR_base
+
+fcast_mLR <- m %>% select(mLR) %>% forecast(new_data = test)
+acc_mLR <- accuracy(fcast_mLR$.mean, test$UNITS)
+acc_mLR
+
+fcast_mRA_base <- m %>% select(mRA_base) %>% forecast(new_data = test)
+acc_mRA_base <- accuracy(fcast_mRA_base$.mean, test$UNITS)
+acc_mRA_base
+
+fcast_mRA <- m %>% select(mRA) %>% forecast(new_data = test)
+acc_mRA <- accuracy(fcast_mRA$.mean, test$UNITS)
+acc_mRA
+```
+
+In conlusion, just a plain TSLM model with log(UNITS) ~ log(P) is the best model for this data set. It resulted in the least AICc and out of sample MAPE. 
+According to our results, it seems like knowing the information related to competitors did not help in predicting the demand of our focal product.
